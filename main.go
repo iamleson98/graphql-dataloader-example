@@ -60,7 +60,6 @@ func (r *resolver) Todos(ctx context.Context, args struct{ Ids []int32 }) ([]*To
 	}
 
 	rows, err := query("todos", squirrel.Eq{"id": args.Ids}).RunWith(r.db).Query()
-
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +80,10 @@ func (r *resolver) Todos(ctx context.Context, args struct{ Ids []int32 }) ([]*To
 
 func (r *resolver) Todo(ctx context.Context, args struct{ Id int32 }) (*Todo, error) {
 	var res Todo
-	err := query("todos", squirrel.Eq{"id": args.Id}).RunWith(r.db).QueryRow().Scan(&res.Id, &res.Title, &res.Content, &res.UserID)
+	err := query("todos", squirrel.Eq{"id": args.Id}).
+		RunWith(r.db).
+		QueryRow().
+		Scan(&res.Id, &res.Title, &res.Content, &res.UserID)
 	if err != nil {
 		return nil, err
 	}
