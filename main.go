@@ -50,10 +50,6 @@ const (
 	dataloaderCtx
 )
 
-type Context struct {
-	resolver
-}
-
 type resolver struct {
 	db *sql.DB
 }
