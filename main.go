@@ -47,7 +47,6 @@ type ctxKey int
 
 const (
 	webCtx ctxKey = iota
-	dataloaderCtx
 )
 
 type resolver struct {
@@ -92,7 +91,7 @@ func (r *resolver) Todo(ctx context.Context, args struct{ Id int32 }) (*Todo, er
 }
 
 func (t *Todo) User(ctx context.Context) (*User, error) {
-	user, err := dataloaders_.userLoaders.Load(ctx, t.UserID)()
+	user, err := dataloaders_.usersByIdLoader.Load(ctx, t.UserID)()
 	if err != nil {
 		return nil, err
 	}
@@ -216,17 +215,17 @@ func main() {
 }
 
 type Dataloaders struct {
-	userLoaders *dataloader.Loader[int32, *User]
+	usersByIdLoader *dataloader.Loader[int32, *User]
 }
 
-func query(tableName string, cons squirrel.Sqlizer) squirrel.SelectBuilder {
+func query(tableName string, conditions squirrel.Sqlizer) squirrel.SelectBuilder {
 	var query squirrel.SelectBuilder
 
 	switch tableName {
 	case "users":
-		query = selector.Select("id", "name", "age").From("users").Where(cons)
+		query = selector.Select("id", "name", "age").From("users").Where(conditions)
 	case "todos":
-		query = selector.Select("id", "title", "content", "userid").From("todos").Where(cons)
+		query = selector.Select("id", "title", "content", "userid").From("todos").Where(conditions)
 	default:
 		log.Fatalf("unknown table name\n: %s", tableName)
 	}
@@ -240,40 +239,45 @@ func query(tableName string, cons squirrel.Sqlizer) squirrel.SelectBuilder {
 	return query
 }
 
+func usersByIdLoader(ctx context.Context, keys []int32) []*dataloader.Result[*User] {
+	db := ctx.Value(webCtx).(*resolver).db
+
+	res := make([]*dataloader.Result[*User], len(keys))
+	userMap := map[int32]*User{}
+
+	rows, err := query("users", squirrel.Eq{"id": keys}).RunWith(db).Query()
+	if err != nil {
+		goto fatal
+	}
+
+	for rows.Next() {
+		var u User
+		err = rows.Scan(&u.Id, &u.Name, &u.Age)
+		if err != nil {
+			goto fatal
+		}
+
+		userMap[u.Id] = &u
+	}
+
+	for idx, id := range keys {
+		res[idx] = &dataloader.Result[*User]{Data: userMap[id]}
+	}
+
+	return res
+
+fatal:
+	for idx := range keys {
+		res[idx] = &dataloader.Result[*User]{
+			Error: err,
+		}
+	}
+	return res
+}
+
 func newDataLoaders() *Dataloaders {
 	return &Dataloaders{
-		userLoaders: dataloader.NewBatchedLoader(func(ctx context.Context, keys []int32) []*dataloader.Result[*User] {
-			db := ctx.Value(webCtx).(*resolver).db
-
-			res := []*dataloader.Result[*User]{}
-
-			rows, err := query("users", squirrel.Eq{"id": keys}).RunWith(db).Query()
-			if err != nil {
-				goto fatal
-			}
-
-			for rows.Next() {
-				var u User
-				err = rows.Scan(&u.Id, &u.Name, &u.Age)
-				if err != nil {
-					goto fatal
-				}
-
-				res = append(res, &dataloader.Result[*User]{
-					Data: &u,
-				})
-			}
-
-			return res
-
-		fatal:
-			for range keys {
-				res = append(res, &dataloader.Result[*User]{
-					Error: err,
-				})
-			}
-			return res
-		}),
+		usersByIdLoader: dataloader.NewBatchedLoader(usersByIdLoader, dataloader.WithBatchCapacity[int32, *User](200)),
 	}
 }
 
