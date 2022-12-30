@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -30,10 +31,34 @@ var (
 	selector = squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar)
 )
 
+// JSONString implements JSONString custom graphql scalar type
+type JSONString map[string]interface{}
+
+func (JSONString) ImplementsGraphQLType(name string) bool {
+	return name == "JSONString"
+}
+
+func (j *JSONString) UnmarshalGraphQL(input interface{}) error {
+	switch t := input.(type) {
+	case map[string]interface{}:
+		*j = t
+
+	default:
+		return fmt.Errorf("wrong type: %T", t)
+	}
+
+	return nil
+}
+
 type User struct {
 	Id   int32  `json:"id"`
 	Name string `json:"name"`
 	Age  int32  `json:"age"`
+	MetadataModel
+}
+
+type MetadataModel struct {
+	MetaData *JSONString `json:"meta_data"`
 }
 
 type Todo struct {
@@ -90,6 +115,58 @@ func (r *resolver) Todo(ctx context.Context, args struct{ Id int32 }) (*Todo, er
 	return &res, nil
 }
 
+func (r *resolver) User(ctx context.Context, args struct{ Id int32 }) (*User, error) {
+	var res User
+	var meta []byte
+
+	err := query("users", squirrel.Eq{"id": args.Id}).
+		RunWith(r.db).
+		QueryRow().
+		Scan(&res.Id, &res.Name, &res.Age, &meta)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(meta) > 0 {
+		err = json.Unmarshal(meta, &res.MetaData)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &res, nil
+}
+
+func (r *resolver) Users(ctx context.Context, args struct{ Ids []int32 }) ([]*User, error) {
+	rows, err := query("users", squirrel.Eq{"id": args.Ids}).RunWith(r.db).Query()
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+	var res []*User
+
+	for rows.Next() {
+		var user User
+		var meta []byte
+		err = rows.Scan(&user.Id, &user.Name, &user.Age, &meta)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(meta) > 0 {
+			err = json.Unmarshal(meta, &user.MetaData)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		res = append(res, &user)
+	}
+
+	return res, nil
+}
+
 func (t *Todo) User(ctx context.Context) (*User, error) {
 	user, err := dataloaders_.usersByIdLoader.Load(ctx, t.UserID)()
 	if err != nil {
@@ -97,6 +174,10 @@ func (t *Todo) User(ctx context.Context) (*User, error) {
 	}
 
 	return user, nil
+}
+
+func (u *User) Todos(ctx context.Context) ([]*Todo, error) {
+	return dataloaders_.todosByUserIDLoader.Load(ctx, u.Id)()
 }
 
 func connectDB() (*sql.DB, error) {
@@ -127,17 +208,23 @@ schema {
 	query: Query
 }
 
+scalar JSONString
+
 type Query {}
 
 extend type Query {
 	todos(ids: [Int!]!): [Todo]!
 	todo(id: Int!): Todo
+	user(id: Int!): User
+	users(ids: [Int!]!): [User]!
 }
 
 type User {
 	id: Int!
 	name: String!
 	age: Int!
+	metadata: JSONString
+	todos: [Todo]!
 }
 
 type Todo {
@@ -215,7 +302,8 @@ func main() {
 }
 
 type Dataloaders struct {
-	usersByIdLoader *dataloader.Loader[int32, *User]
+	usersByIdLoader     *dataloader.Loader[int32, *User]
+	todosByUserIDLoader *dataloader.Loader[int32, []*Todo]
 }
 
 func query(tableName string, conditions squirrel.Sqlizer) squirrel.SelectBuilder {
@@ -223,7 +311,7 @@ func query(tableName string, conditions squirrel.Sqlizer) squirrel.SelectBuilder
 
 	switch tableName {
 	case "users":
-		query = selector.Select("id", "name", "age").From("users").Where(conditions)
+		query = selector.Select("id", "name", "age", "metadata").From("users").Where(conditions)
 	case "todos":
 		query = selector.Select("id", "title", "content", "userid").From("todos").Where(conditions)
 	default:
@@ -237,6 +325,47 @@ func query(tableName string, conditions squirrel.Sqlizer) squirrel.SelectBuilder
 	log.Println(str, args)
 
 	return query
+}
+
+func todoByUserIDLoader(ctx context.Context, userIDs []int32) []*dataloader.Result[[]*Todo] {
+	var (
+		res     = make([]*dataloader.Result[[]*Todo], len(userIDs))
+		todos   []*Todo
+		todoMap = map[int32][]*Todo{}
+	)
+
+	db := ctx.Value(webCtx).(*resolver).db
+
+	rows, err := query("todos", squirrel.Eq{"userid": userIDs}).RunWith(db).Query()
+	if err != nil {
+		goto errorLabel
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var todo Todo
+		err = rows.Scan(&todo.Id, &todo.Title, &todo.Content, &todo.UserID)
+		if err != nil {
+			goto errorLabel
+		}
+
+		todos = append(todos, &todo)
+	}
+
+	for _, td := range todos {
+		todoMap[td.UserID] = append(todoMap[td.UserID], td)
+	}
+
+	for idx, id := range userIDs {
+		res[idx] = &dataloader.Result[[]*Todo]{Data: todoMap[id]}
+	}
+	return res
+
+errorLabel:
+	for idx := range userIDs {
+		res[idx] = &dataloader.Result[[]*Todo]{Error: err}
+	}
+	return res
 }
 
 func usersByIdLoader(ctx context.Context, keys []int32) []*dataloader.Result[*User] {
@@ -277,7 +406,8 @@ fatal:
 
 func newDataLoaders() *Dataloaders {
 	return &Dataloaders{
-		usersByIdLoader: dataloader.NewBatchedLoader(usersByIdLoader, dataloader.WithBatchCapacity[int32, *User](200)),
+		usersByIdLoader:     dataloader.NewBatchedLoader(usersByIdLoader, dataloader.WithBatchCapacity[int32, *User](200)),
+		todosByUserIDLoader: dataloader.NewBatchedLoader(todoByUserIDLoader, dataloader.WithBatchCapacity[int32, []*Todo](200)),
 	}
 }
 

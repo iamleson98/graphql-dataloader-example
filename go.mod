@@ -5,8 +5,8 @@ go 1.19
 require (
 	github.com/Masterminds/squirrel v1.5.3
 	github.com/golang-migrate/migrate/v4 v4.15.2
-	github.com/graph-gophers/dataloader/v7 v7.0.0
-	github.com/graph-gophers/graphql-go v1.4.0
+	github.com/graph-gophers/dataloader/v7 v7.1.0
+	github.com/graph-gophers/graphql-go v1.5.0
 	github.com/lib/pq v1.10.7
 )
 
