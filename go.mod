@@ -1,13 +1,13 @@
-module github.com/iamleson98/graphql-dataloader
+module sample-graphql
 
-go 1.19
+go 1.20
 
 require (
-	github.com/Masterminds/squirrel v1.5.3
-	github.com/golang-migrate/migrate/v4 v4.15.2
+	github.com/Masterminds/squirrel v1.5.4
+	github.com/golang-migrate/migrate/v4 v4.16.0
 	github.com/graph-gophers/dataloader/v7 v7.1.0
-	github.com/graph-gophers/graphql-go v1.5.0
-	github.com/lib/pq v1.10.7
+	github.com/graph-gophers/graphql-go v1.5.1-0.20230420075959-f0f4e10d6a70
+	github.com/lib/pq v1.10.9
 )
 
 require (
